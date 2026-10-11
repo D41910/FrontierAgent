@@ -138,6 +138,95 @@ def test_terminal_modes_only_select_guarded_web_fetch_implementations() -> None:
     assert "aligned" in seen
 
 
+# Entry shapes ``_domain_matches`` distinguishes: a bare domain (hostname
+# suffix match) and a URL prefix (segment-boundary match). The last two are the
+# controls — a longer id must not be caught by the prefix, and an unlisted host
+# must stay reachable.
+_OPERATOR_BLOCKLIST = "blocked.example.com,zhihu.com/question/123"
+_OPERATOR_BLOCKED_URLS = [
+    "https://blocked.example.com/secret",
+    "https://sub.blocked.example.com/x",
+    "https://zhihu.com/question/123/answer/456",
+]
+_OPERATOR_ALLOWED_URLS = [
+    "https://zhihu.com/question/1234",
+    "https://notblocked.example.org/page",
+]
+
+
+@pytest.fixture()
+def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer every name with a public address.
+
+    Without this the SSRF guard refuses first (a test host does not resolve),
+    which would mask the blocklist layer these tests are about. The literal
+    IPs in ``_NON_PUBLIC_URLS`` cannot be used here — they are the opposite of
+    what this fixture needs to say.
+    """
+    bounded = importlib.import_module("plugins.tools._bounded_fetch")
+
+    async def fake_vet(url: str) -> tuple[str, tuple[str, ...]]:
+        return "", ("93.184.216.34",)
+
+    monkeypatch.setattr(bounded, "vet_public_url", fake_vet)
+
+
+@pytest.mark.parametrize("url", _OPERATOR_BLOCKED_URLS)
+async def test_aligned_web_fetch_honours_the_operator_domain_blocklist(
+    url: str, monkeypatch: pytest.MonkeyPatch, _public_dns: None,
+) -> None:
+    """``WEB_DOMAIN_BLACKLIST_EXTRA`` is a hard block, not a display filter.
+
+    ``web_fetch`` is reachable straight from page content, so the list that
+    hides a domain from ``web_search`` results has to refuse the fetch too.
+    Guarding only ``plugins/tools/web_fetch.py`` left the implementation the
+    shipped react profile selects (``web_fetch_impl: aligned``) fetching
+    domains the operator blocked.
+    """
+    from frontier_agent.infra.config import get_config
+
+    aligned = importlib.import_module("plugins.tools.web_fetch_aligned")
+    monkeypatch.setattr(
+        get_config(), "web_domain_blacklist_extra", _OPERATOR_BLOCKLIST,
+    )
+
+    def no_transport(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a request was issued for a blocked domain")
+
+    monkeypatch.setattr(aligned.httpx, "AsyncClient", no_transport)
+
+    result = await aligned._fetch_single(url, "anything")
+
+    assert result.startswith("Blocked:")
+    assert "blocklist" in result
+
+
+@pytest.mark.parametrize("url", _OPERATOR_ALLOWED_URLS)
+async def test_aligned_web_fetch_keeps_unlisted_domains_reachable(
+    url: str, monkeypatch: pytest.MonkeyPatch, _public_dns: None,
+) -> None:
+    """The blocklist matches on domain boundaries, not on substrings.
+
+    ``zhihu.com/question/1234`` must survive an entry for ``.../123`` — a
+    naive prefix test would swallow a neighbouring page.
+    """
+    from frontier_agent.infra.config import get_config
+
+    aligned = importlib.import_module("plugins.tools.web_fetch_aligned")
+    monkeypatch.setattr(
+        get_config(), "web_domain_blacklist_extra", _OPERATOR_BLOCKLIST,
+    )
+
+    def no_transport(*args: object, **kwargs: object) -> None:
+        raise AssertionError("no request was expected for an unlisted domain")
+
+    monkeypatch.setattr(aligned.httpx, "AsyncClient", no_transport)
+
+    result = await aligned._fetch_single(url, "anything")
+
+    assert "blocklist" not in result
+
+
 async def test_redirect_hops_are_validated_not_followed_blindly() -> None:
     """A vetted public URL can still answer 302 → private, so each hop is
     re-vetted instead of letting httpx follow the chain."""

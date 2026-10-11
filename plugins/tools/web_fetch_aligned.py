@@ -40,6 +40,7 @@ from plugins.tools._render_check import (
     unrendered_kind,
 )
 from plugins.tools._scrape_cache import ScrapeUnavailable, scrape_result_cache
+from plugins.tools.web_search import is_domain_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -569,6 +570,18 @@ async def _fetch_single(
         return (
             f"Blocked: {non_public}. Only public http(s) endpoints may be "
             "fetched. Use a public source."
+        )
+
+    # Operator hard-block (``WEB_DOMAIN_BLACKLIST_EXTRA`` / the profile's
+    # ``web_domain_blacklist:``) — the same list that filters web_search
+    # results, enforced here so a direct URL coming out of page content cannot
+    # bypass it. Guarding only ``plugins/tools/web_fetch.py`` left this
+    # implementation open for the same reason the SSRF guard above had to be
+    # mirrored here.
+    if is_domain_blocked(url):
+        return (
+            f"Blocked: the domain of {url} is on the operator blocklist and "
+            "must not be accessed. Use a different source."
         )
 
     if any(pat in url for pat in _BANNED_URL_PATTERNS):
